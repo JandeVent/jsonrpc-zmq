@@ -1,0 +1,37 @@
+# vscode
+.vscode/
+
+# python binary
+__pycache__/
+*.pyc
+
+# sphinx docs
+docs/build/
+docs/source/_build/
+docs/source/api/
+
+# distribution files
+*.egg-info
+build/
+
+# pytest cache
+.pytest_cache
+
+# jetbrains
+.idea/
+
+# packaging files
+package.ini
+package.log
+dist
+
+# pytest-cov coverage report
+.coverage
+coverage_report_*
+tests_report/
+
+# macOS
+.DS_Store
+
+# pycharm
+.idea
