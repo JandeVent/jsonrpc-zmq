@@ -120,9 +120,9 @@ class RecvWorker(QObject):
 
     @Slot()
     def start(self):
-        fd = self._socket.getsockopt(zmq.FD)
-        self._notifier = QSocketNotifier(fd, QSocketNotifier.Type.Read, self)
-        self._notifier.activated.connect(self._recv_loop)
+        self._timer = QTimer()
+        self._timer.timeout.connect(self._recv_loop)
+        self._timer.start(10) # check send queue and kick receive loop every 10ms
 
     @Slot()
     def _recv_loop(self):

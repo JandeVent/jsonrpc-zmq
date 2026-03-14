@@ -509,3 +509,9 @@ Current limitations:
 * CLI automation tools
 * IPC between processes
 
+
+## License
+
+Copyright (C) 2018-2026
+Connet Information Technology Company, Shanghai.
+
