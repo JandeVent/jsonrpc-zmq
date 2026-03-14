@@ -63,30 +63,25 @@ class QPendingRequest(QObject):
 class SendWorker(QObject):
 
     exceptionOccurred = Signal(Exception) # any exception happened in worker
-    sendMessageSignal = Signal(bytes)  # 信号，跨线程调用
 
     def __init__(self, zmq_socket: zmq.Socket):
         super().__init__()
         self._socket: zmq.Socket = zmq_socket
         self._send_queue: Deque[bytes] = deque(maxlen=1000)
-        self.sendMessageSignal.connect(self._on_send_message)
-
-    @Slot()
-    def start(self):
-        ...
 
     def send_message(self, msg: bytes):
         """主线程调用"""
-        self.sendMessageSignal.emit(msg)
-
-    @Slot(bytes)
-    def _on_send_message(self, msg: bytes):
         if len(self._send_queue) >= self._send_queue.maxlen:
             self.exceptionOccurred.emit(TransportError("peer too slow (probably dead)"))
             return
 
         self._send_queue.append(msg)
-        self._send_loop()  # 消息到达直接尝试发送
+
+    @Slot()
+    def start(self):
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._send_loop)
+        self._timer.start(10)  # check send queue and kick send loop every 10ms
 
     @Slot()
     def _send_loop(self):

@@ -33,7 +33,7 @@ def test_invalid_state_errors(qtbot, app):
     peer2.stop()
     for method in [peer2.request, peer2.notify]:
         with pytest.raises(Exception):
-            method("ping")
+            method("ping", timeout=1)
 
     # 3. start twice
     peer3 = QJsonRpcPeer(addr, bind=False)
