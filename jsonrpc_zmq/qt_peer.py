@@ -68,6 +68,9 @@ class SendWorker(QObject):
         super().__init__()
         self._socket: zmq.Socket = zmq_socket
         self._send_queue: Deque[bytes] = deque(maxlen=1000)
+        self._timer = QTimer()  # 放在主线程
+        self._timer.timeout.connect(self._send_loop)
+        self._timer.start(10)  # check send queue and kick send loop every 10ms
 
     def send_message(self, msg: bytes):
         """主线程调用"""
@@ -76,12 +79,6 @@ class SendWorker(QObject):
             return
 
         self._send_queue.append(msg)
-
-    @Slot()
-    def start(self):
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._send_loop)
-        self._timer.start(10)  # check send queue and kick send loop every 10ms
 
     @Slot()
     def _send_loop(self):
@@ -112,10 +109,7 @@ class RecvWorker(QObject):
         self._parse_response_json = parse_json
         self._socket: zmq.Socket = zmq_socket
         self._notifier: Optional[QSocketNotifier] = None
-
-    @Slot()
-    def start(self):
-        self._timer = QTimer()
+        self._timer = QTimer() # 放在主线程
         self._timer.timeout.connect(self._recv_loop)
         self._timer.start(10) # check send queue and kick receive loop every 10ms
 
@@ -199,14 +193,12 @@ class QJsonRpcPeer(QObject):
         self._send_worker = SendWorker(self._socket)
         self._send_worker.moveToThread(self._io_thread)
         self._send_worker.exceptionOccurred.connect(self.exceptionOccurred)
-        self._io_thread.started.connect(self._send_worker.start)
 
         self._recv_worker = RecvWorker(self._socket)
         self._recv_worker.moveToThread(self._io_thread)
         self._recv_worker.responseReceived.connect(self.responseReceived)
         self._recv_worker.requestReceived.connect(self.requestReceived)
         self._recv_worker.exceptionOccurred.connect(self.exceptionOccurred)
-        self._io_thread.started.connect(self._recv_worker.start)
 
     def last_endpoint(self) -> str:
         return self._socket.last_endpoint
