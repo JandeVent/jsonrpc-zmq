@@ -102,6 +102,7 @@ setup(
     keywords="JSONRPC ZMQ",
     url="",
     project_urls={
+        "url": "https://github.com/JandeVent/jsonrpc-zmq"
     },
     classifiers=[
         "Intended Audience :: Developers",
