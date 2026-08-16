@@ -1,11 +1,14 @@
 
 import sys
-from qtpy.QtWidgets import QApplication
+
 from qtpy.QtCore import QTimer
-from jsonrpc_zmq import QJsonRpcPeer
+from qtpy.QtWidgets import QApplication
+
+from jsonrpc_zmq import JsonRpcError, QJsonRpcPeer, RequestTimeoutError
 
 app = None
-peer: QJsonRpcPeer = None
+peer = None
+
 
 def main():
     global peer
@@ -15,13 +18,23 @@ def main():
 
 def request_and_quit():
     global peer, app
-    result = peer.request("ping")
-    print(result)
-    peer.stop()
-    app.quit()
+    try:
+        result = peer.request("ping", timeout=3)
+        print("got:", result)
+    except JsonRpcError as e:
+        print("Remote error:", e)
+    except RequestTimeoutError as e:
+        print("Request timeout:", e)
+    finally:
+        peer.stop()
+        app.quit()
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     main()
-    QTimer.singleShot(1000, lambda: request_and_quit())
-    app.exec_()
+    QTimer.singleShot(1000, request_and_quit)
+    try:
+        app.exec_()
+    except KeyboardInterrupt:
+        pass

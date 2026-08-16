@@ -157,58 +157,93 @@ Server:
 
 ```python
 import asyncio
-from jsonrpc_zmq import AsyncJsonRpcPeer, Success, Error
+import logging
+
+from jsonrpc_zmq import AsyncJsonRpcPeer, Success
+
+logging.basicConfig(level=logging.INFO)
 
 
-async def pong():
-    return Success("Pong")
+async def pong(ss=None):
+    """ping handler: echoes back the optional 'ss' parameter"""
+    return Success("pong" if ss is None else f"pong: {ss}")
+
+
+async def echo(msg=None):
+    print("received notification:", msg)
+    return Success(msg)
 
 
 async def server_main():
     server = AsyncJsonRpcPeer("tcp://127.0.0.1:5556", bind=True)
     server.add_handler("ping", pong)
+    server.add_handler("echo", echo)
     server.start()
-    await asyncio.Event().wait()
-    await server.stop()
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await server.stop()
 
-asyncio.run(server_main())
+
+try:
+    asyncio.run(server_main())
+except KeyboardInterrupt:
+    print("server stopped")
 ```
 
 Client:
 
 ```python
 import asyncio
+import logging
+
 from jsonrpc_zmq import AsyncJsonRpcPeer, JsonRpcError, RequestTimeoutError
 
-import logging
 logging.basicConfig(level=logging.DEBUG)
+
 
 async def client_main():
     client = AsyncJsonRpcPeer("tcp://127.0.0.1:5556", bind=False)
     client.start()
-    # call server's ping
     try:
-        res = await client.request("ping", {'ss': 1})
-    except JsonRpcError:
-        print("Remote error")
-    except RequestTimeoutError:
-        print("Request timeout")
+        # request with params; the server's ping handler echoes the value back
+        try:
+            res = await client.request("ping", {"ss": 1}, timeout=3)
+            print("got:", res)
+        except JsonRpcError as e:
+            print("Remote error:", e)
+        except RequestTimeoutError as e:
+            print("Request timeout:", e)
 
-    res = await client.request("ping")
-    print("got:", res)
-    # send notification
-    client.notify("echo", {"msg": "hello"})
-    print("sleeping 10 seconds...")
-    await asyncio.sleep(10)
-    await client.stop()
+        # plain request
+        try:
+            res = await client.request("ping", timeout=3)
+            print("got:", res)
+        except JsonRpcError as e:
+            print("Remote error:", e)
+        except RequestTimeoutError as e:
+            print("Request timeout:", e)
 
-asyncio.run(client_main())
+        # notification (fire-and-forget; the server prints what it receives)
+        client.notify("echo", {"msg": "hello"})
+        print("sleeping 10 seconds...")
+        await asyncio.sleep(10)
+    finally:
+        await client.stop()
+
+
+try:
+    asyncio.run(client_main())
+except KeyboardInterrupt:
+    pass
 ```
 
 Output:
 
 ```
+got: pong: 1
 got: pong
+sleeping 10 seconds...
 ```
 
 ---
@@ -261,8 +296,8 @@ from jsonrpc_zmq import QJsonRpcPeer, Success
 app = None
 peer = None
 
-def ping():
-    return Success("pong")
+def ping(ss=None):
+    return Success("pong" if ss is None else f"pong: {ss}")
 
 def main():
     global peer
@@ -274,7 +309,12 @@ def main():
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     main()
-    app.exec_()
+    try:
+        rc = app.exec_()
+    except KeyboardInterrupt:
+        rc = 0
+    peer.stop()
+    sys.exit(rc)
 ```
 
 Client:
@@ -282,12 +322,12 @@ Client:
 ```python
 
 import sys
-from qtpy.QtWidgets import QApplication
 from qtpy.QtCore import QTimer
-from jsonrpc_zmq import QJsonRpcPeer
+from qtpy.QtWidgets import QApplication
+from jsonrpc_zmq import JsonRpcError, QJsonRpcPeer, RequestTimeoutError
 
 app = None
-peer: QJsonRpcPeer = None
+peer = None
 
 def main():
     global peer
@@ -297,16 +337,25 @@ def main():
 
 def request_and_quit():
     global peer, app
-    result = peer.request("ping")
-    print(result)
-    peer.stop()
-    app.quit()
+    try:
+        result = peer.request("ping", timeout=3)
+        print("got:", result)
+    except JsonRpcError as e:
+        print("Remote error:", e)
+    except RequestTimeoutError as e:
+        print("Request timeout:", e)
+    finally:
+        peer.stop()
+        app.quit()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     main()
-    QTimer.singleShot(1000, lambda: request_and_quit())
-    app.exec_()
+    QTimer.singleShot(1000, request_and_quit)
+    try:
+        app.exec_()
+    except KeyboardInterrupt:
+        pass
 ```
 
 ---
