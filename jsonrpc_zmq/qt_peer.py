@@ -3,6 +3,8 @@
 
 
 import logging
+import threading
+import time
 from collections import deque
 from functools import partial
 from typing import Any, Callable, Deque, Dict, Optional, Tuple, Union
@@ -13,7 +15,8 @@ from jsonrpcclient.requests import (id_generators, json, notification,
 from jsonrpcclient.responses import Error, Ok, Response, parse_json
 from jsonrpcserver import Result, dispatch
 
-from qtpy.QtCore import QEventLoop, QObject, QThread, QTimer, Signal, Slot, QSocketNotifier
+from qtpy.QtCore import (QEventLoop, QMetaObject, QObject, QSocketNotifier,
+                         QThread, QTimer, Qt, Signal, Slot)
 from .exceptions import JsonRpcError, RequestTimeoutError, TransportError
 
 logger = logging.getLogger("QJsonRpcPeer")
@@ -28,27 +31,41 @@ class QPendingRequest(QObject):
         self._result = None
         self._exception = None
         self._loop = QEventLoop()
+        self._event = threading.Event()
         self._done = False
 
     def done(self) -> bool:
         return self._done
 
     def wait(self, timeout: Optional[float]=None):
-        if timeout:
-            timer = QTimer()
-            timer.setSingleShot(True)
-            timer.timeout.connect(self._loop.quit)
-            timer.start(int(timeout * 1000))
-        self._loop.exec_()
+        deadline = time.monotonic() + timeout if timeout else None
+        if threading.current_thread() is threading.main_thread():
+            # main thread: pump events so the server-side requestReceived
+            # dispatch and the response notification can be processed.
+            # Bounded pumping (maxTime) guarantees the wait terminates even
+            # if a cross-thread wakeup is lost; the response itself is
+            # resolved in the IO thread and _done is set directly.
+            while not self._done:
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
+                self._loop.processEvents(QEventLoop.ProcessEventsFlag.WaitForMoreEvents, 50)
+        else:
+            # worker thread: the response is resolved by the IO thread; a
+            # threading.Event wakeup is 100% reliable (unlike a cross-thread
+            # QEventLoop.quit(), which can occasionally fail to wake a
+            # blocked exec_()).
+            self._event.wait(timeout)
         self._done = True
 
     def set_result(self, result: Any):
         self._result = result
-        self._loop.quit()
+        self._done = True
+        self._event.set()
 
     def set_exception(self, exc: Exception):
         self._exception = exc
-        self._loop.quit()
+        self._done = True
+        self._event.set()
 
     def exception(self) -> Optional[Exception]:
         return self._exception
@@ -63,14 +80,28 @@ class QPendingRequest(QObject):
 class SendWorker(QObject):
 
     exceptionOccurred = Signal(Exception) # any exception happened in worker
+    _kick = Signal()  # internal: wake the send loop in the IO thread (queued)
 
     def __init__(self, zmq_socket: zmq.Socket):
         super().__init__()
         self._socket: zmq.Socket = zmq_socket
         self._send_queue: Deque[bytes] = deque(maxlen=1000)
-        self._timer = QTimer()  # 放在主线程
-        self._timer.timeout.connect(self._send_loop)
-        self._timer.start(10)  # check send queue and kick send loop every 10ms
+        self._retry_timer: Optional[QTimer] = None  # created in IO thread (start)
+        self._kick.connect(self._send_loop)
+
+    @Slot()
+    def start(self):
+        """Called in the IO thread (queued) after the thread starts."""
+        # Retry timer: only active while the peer is slow (zmq.Again backpressure)
+        self._retry_timer = QTimer(self)
+        self._retry_timer.setInterval(10)
+        self._retry_timer.timeout.connect(self._send_loop)
+
+    @Slot()
+    def shutdown(self):
+        """Called in the IO thread before the thread quits."""
+        if self._retry_timer is not None:
+            self._retry_timer.stop()
 
     def send_message(self, msg: bytes):
         """主线程调用"""
@@ -79,6 +110,7 @@ class SendWorker(QObject):
             return
 
         self._send_queue.append(msg)
+        self._kick.emit()  # wake the IO thread immediately (queued connection)
 
     @Slot()
     def _send_loop(self):
@@ -89,10 +121,16 @@ class SendWorker(QObject):
                 logger.debug(f"send message: {msg}")
                 self._send_queue.popleft()
             except zmq.Again:
-                break
+                # peer slow: retry on a short timer instead of busy-polling
+                if self._retry_timer is not None:
+                    self._retry_timer.start()
+                return
             except Exception as e:
                 self.exceptionOccurred.emit(e)
-                break
+                return
+        # queue drained
+        if self._retry_timer is not None:
+            self._retry_timer.stop()
 
 
 # -------------------------
@@ -104,14 +142,36 @@ class RecvWorker(QObject):
     requestReceived = Signal(str)  # request / notification
     exceptionOccurred = Signal(Exception) # any exception happened in worker
 
-    def __init__(self, zmq_socket):
+    def __init__(self, zmq_socket, on_response=None):
         super().__init__()
         self._parse_response_json = parse_json
         self._socket: zmq.Socket = zmq_socket
-        self._notifier: Optional[QSocketNotifier] = None
-        self._timer = QTimer() # 放在主线程
-        self._timer.timeout.connect(self._recv_loop)
-        self._timer.start(10) # check send queue and kick receive loop every 10ms
+        self._on_response: Optional[Callable[[str], None]] = on_response
+        self._notifier: Optional[QSocketNotifier] = None  # created in IO thread (start)
+        self._safety_timer: Optional[QTimer] = None  # created in IO thread (start)
+
+    @Slot()
+    def start(self):
+        """Called in the IO thread (queued) after the thread starts."""
+        fd = self._socket.getsockopt(zmq.FD)
+        self._notifier = QSocketNotifier(fd, QSocketNotifier.Type.Read, self)
+        self._notifier.activated.connect(self._recv_loop)
+        # Safety net: re-poll occasionally in case the notifier misses an event
+        # (a rare OS-level wakeup race; a missed activation is otherwise
+        # bounded by this timer). 250ms keeps idle CPU negligible while
+        # bounding a rare latency spike to ~250ms.
+        self._safety_timer = QTimer(self)
+        self._safety_timer.setInterval(250)
+        self._safety_timer.timeout.connect(self._recv_loop)
+        self._safety_timer.start()
+
+    @Slot()
+    def shutdown(self):
+        """Called in the IO thread before the thread quits."""
+        if self._safety_timer is not None:
+            self._safety_timer.stop()
+        if self._notifier is not None:
+            self._notifier.setEnabled(False)
 
     @Slot()
     def _recv_loop(self):
@@ -149,10 +209,22 @@ class RecvWorker(QObject):
                 # --- response ---
                 elif "id" in data and ("result" in data or "error" in data):
                     logger.debug(f"received response: {text}")
+                    # resolve the pending request IN THE IO THREAD so the
+                    # request path never depends on the main thread's event
+                    # loop (whose event delivery can occasionally be delayed)
+                    if self._on_response is not None:
+                        try:
+                            self._on_response(text)
+                        except Exception:
+                            logger.exception("response resolution error")
                     self.responseReceived.emit(text)
 
         except Exception as e:
             self.exceptionOccurred.emit(e)
+        finally:
+            # re-arm the notifier (Qt disables it after activation)
+            if self._notifier is not None:
+                self._notifier.setEnabled(True)
 
 
 # -------------------------
@@ -194,7 +266,7 @@ class QJsonRpcPeer(QObject):
         self._send_worker.moveToThread(self._io_thread)
         self._send_worker.exceptionOccurred.connect(self.exceptionOccurred)
 
-        self._recv_worker = RecvWorker(self._socket)
+        self._recv_worker = RecvWorker(self._socket, on_response=self._resolve_response)
         self._recv_worker.moveToThread(self._io_thread)
         self._recv_worker.responseReceived.connect(self.responseReceived)
         self._recv_worker.requestReceived.connect(self.requestReceived)
@@ -212,10 +284,18 @@ class QJsonRpcPeer(QObject):
     def start(self):
         self._started = True
         self._io_thread.start()
+        # create notifiers/timers inside the IO thread
+        QMetaObject.invokeMethod(self._send_worker, "start", Qt.ConnectionType.QueuedConnection)
+        QMetaObject.invokeMethod(self._recv_worker, "start", Qt.ConnectionType.QueuedConnection)
 
     def stop(self):
         self._stopped = True
         logger.debug("io thread quiting")
+        if self._io_thread.isRunning():
+            # stop timers/notifiers inside the IO thread to avoid
+            # cross-thread timer destruction warnings
+            QMetaObject.invokeMethod(self._send_worker, "shutdown", Qt.ConnectionType.BlockingQueuedConnection)
+            QMetaObject.invokeMethod(self._recv_worker, "shutdown", Qt.ConnectionType.BlockingQueuedConnection)
         self._io_thread.quit()
         self._io_thread.wait()
         try:
@@ -292,21 +372,23 @@ class QJsonRpcPeer(QObject):
     # -------------------------
     # 内部 slot
     # -------------------------
+    def _resolve_response(self, text: str):
+        """Resolve a pending request. Runs in the IO thread (recv worker)."""
+        response: Response = self._parse_response_json(text)
+        fut: QPendingRequest = self._pending.get(response.id, None)
+        if fut is None:
+            logger.warning("unmatched response: %r", response)
+        else:
+            if isinstance(response, Ok):
+                fut.set_result(response.result)
+            elif isinstance(response, Error):
+                fut.set_exception(JsonRpcError(response.code, response.message, response.data))
+
     @Slot(str)
     def responseReceived(self, text: str):
-        try:
-            response: Response = self._parse_response_json(text)
-            fut: QPendingRequest = self._pending.get(response.id, None)
-            if fut is None:
-                logger.warning("unmatched response: %r", response)
-            else:
-                if isinstance(response, Ok):
-                    fut.set_result(response.result)
-                elif isinstance(response, Error):
-                    fut.set_exception(JsonRpcError(response.code, response.message, response.data))
-
-        except Exception as e:
-            logger.exception("invalid json rpc received: %r", e)
+        # application-level notification only; the request is already
+        # resolved in the IO thread
+        logger.debug("response delivered: %r", text)
 
     @Slot(str)
     def requestReceived(self, text: str):
