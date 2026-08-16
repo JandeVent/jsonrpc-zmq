@@ -95,10 +95,10 @@ dispatch / resolve pending
 
 # Installation
 
-Install dependencies:
+Install the package (dependencies are pulled in automatically):
 
 ```bash
-pip install pyzmq jsonrpcclient jsonrpcserver qtpy
+pip install .
 ```
 
 Dependencies:

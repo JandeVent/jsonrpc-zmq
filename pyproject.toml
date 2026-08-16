@@ -1,0 +1,38 @@
+# -*- coding: utf-8 -*-
+# Copyright (C) 2018-2026 Connet Information Technology Company, Shanghai.
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jsonrpc-zmq"
+version = "2026.08.16"
+description = "JSONRPC ZMQ."
+readme = "README.md"
+requires-python = ">=3.9"
+keywords = ["JSONRPC", "ZMQ"]
+authors = [
+    { name = "Connet Information Technology Company Ltd, Shanghai.", email = "tech_support@shconnet.com.cn" },
+]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Software Development :: Interpreters",
+]
+dependencies = [
+    "jsonrpcserver",
+    "jsonrpcclient",
+    "pyzmq",
+    "qtpy",
+]
+
+[project.urls]
+url = "https://github.com/JandeVent/jsonrpc-zmq"
+
+[tool.setuptools]
+packages = ["jsonrpc_zmq"]
