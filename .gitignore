@@ -38,3 +38,6 @@ tests_report/
 
 .dist
 .wheels
+
+# benchmark results (machine-generated)
+bench/results/
